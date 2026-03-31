@@ -1,2 +1,13 @@
 .env
 README.md
+heta.session.sql
+.gitignore
+node_modules/
+schema.sql
+BACKEND_API_SUMMARY.md
+FRONTEND_SUMMARY.md
+insert_bills.sql
+insert_sample_data.sql
+SQL_QUERIES_FOR_TABLES.sql
+setup_billing_data.sql
+update_prices.sql
