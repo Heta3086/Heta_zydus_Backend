@@ -272,6 +272,65 @@ func CreateAppointment(c *gin.Context) {
 	c.JSON(200, gin.H{"message": "Appointment requested"})
 }
 
+func BookPatientAppointment(c *gin.Context) {
+	var input struct {
+		PatientID int    `json:"patient_id"`
+		DoctorID  int    `json:"doctor_id"`
+		Date      string `json:"appointment_date"`
+		Time      string `json:"appointment_time"`
+		Reason    string `json:"reason"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if input.PatientID == 0 || input.DoctorID == 0 {
+		c.JSON(400, gin.H{"error": "Patient ID and Doctor ID are required"})
+		return
+	}
+
+	// Verify patient exists
+	var patientExists bool
+	err := config.DB.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM patients WHERE patient_id=$1)",
+		input.PatientID,
+	).Scan(&patientExists)
+
+	if err != nil || !patientExists {
+		c.JSON(400, gin.H{"error": "Patient not found"})
+		return
+	}
+
+	// Verify doctor exists
+	var doctorExists bool
+	err = config.DB.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM doctors WHERE doctor_id=$1)",
+		input.DoctorID,
+	).Scan(&doctorExists)
+
+	if err != nil || !doctorExists {
+		c.JSON(400, gin.H{"error": "Doctor not found"})
+		return
+	}
+
+	// Insert appointment
+	_, err = config.DB.Exec(context.Background(),
+		`INSERT INTO appointments 
+		(patient_id, doctor_id, appointment_date, appointment_time, reason, status)
+		VALUES ($1,$2,$3,$4,$5,'scheduled')`,
+		input.PatientID, input.DoctorID, input.Date, input.Time, input.Reason,
+	)
+
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to book appointment"})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Appointment booked successfully"})
+}
+
 func GetAppointments(c *gin.Context) {
 	rows, err := config.DB.Query(context.Background(),
 		`SELECT appointment_id,
@@ -877,6 +936,59 @@ func GetMyAppointments(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"appointments": list})
 }
 
+func CancelPatientAppointment(c *gin.Context) {
+	userID, err := getCurrentUserID(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user session"})
+		return
+	}
+
+	appointmentID := c.Param("id")
+
+	var input struct {
+		CancellationReason string `json:"cancellation_reason"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify appointment belongs to current patient and get its current status
+	var patientID int
+	var currentStatus string
+	err = config.DB.QueryRow(context.Background(),
+		`SELECT p.patient_id, a.status FROM appointments a
+		 JOIN patients p ON a.patient_id = p.patient_id
+		 WHERE a.appointment_id=$1 AND p.user_id=$2`,
+		appointmentID, userID,
+	).Scan(&patientID, &currentStatus)
+
+	if err != nil {
+		c.JSON(400, gin.H{"error": "Appointment not found or you don't have permission to cancel it"})
+		return
+	}
+
+	// Update appointment status to cancelled
+	result, err := config.DB.Exec(context.Background(),
+		`UPDATE appointments SET status='cancelled', reason=$1 WHERE appointment_id=$2`,
+		input.CancellationReason, appointmentID,
+	)
+
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to cancel appointment: " + err.Error()})
+		return
+	}
+
+	rowsAffected := result.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(400, gin.H{"error": "Appointment not found"})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Appointment cancelled successfully"})
+}
+
 func StartAppointment(c *gin.Context) {
 	id := c.Param("id")
 
@@ -943,7 +1055,7 @@ func CompleteAppointment(c *gin.Context) {
 	c.JSON(200, gin.H{"message": "Appointment completed"})
 }
 
-// generateBillForAppointment creates a bill when an appointment is completed
+// generateBillForAppointment creates a bill with itemized line items when an appointment is completed
 func generateBillForAppointment(appointmentID int) error {
 	// Check if bill already exists for this appointment
 	var existingBill int
@@ -959,7 +1071,7 @@ func generateBillForAppointment(appointmentID int) error {
 	// Get appointment details with consultation fee
 	var patientID int
 	var doctorID int
-	var consultationFee int = 500 // Default consultation fee
+	var consultationFee int = 500 // Default consultation fee (in paise = ₹5)
 	err = config.DB.QueryRow(context.Background(),
 		`SELECT a.patient_id, a.doctor_id
 		 FROM appointments a
@@ -971,8 +1083,15 @@ func generateBillForAppointment(appointmentID int) error {
 		return fmt.Errorf("failed to get appointment details: %v", err)
 	}
 
-	// Get doctor's consultation fee
-	err = config.DB.QueryRow(context.Background(),
+	// Start transaction for atomicity
+	tx, err := config.DB.Begin(context.Background())
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+
+	// Get doctor's consultation fee (default 500 paise = ₹5)
+	err = tx.QueryRow(context.Background(),
 		`SELECT COALESCE(CAST(consultation_fee AS INTEGER), 500)
 		 FROM doctors WHERE doctor_id=$1`,
 		doctorID,
@@ -980,8 +1099,10 @@ func generateBillForAppointment(appointmentID int) error {
 
 	// Calculate medicine charges from prescription
 	var medicineTotal int = 0
-	medicineRows, err := config.DB.Query(context.Background(),
-		`SELECT COALESCE(SUM(CAST(pi.quantity AS INTEGER) * CAST(m.unit_price AS INTEGER)), 0)
+	var medicineCount int = 0
+	medicineRows, err := tx.Query(context.Background(),
+		`SELECT COALESCE(SUM(CAST(COALESCE(pi.quantity, 1) AS INTEGER) * CAST(COALESCE(m.unit_price, 0) AS INTEGER)), 0),
+		        COUNT(DISTINCT pi.medicine_id)
 		 FROM prescriptions p
 		 JOIN prescription_items pi ON p.prescription_id = pi.prescription_id
 		 JOIN medicines m ON pi.medicine_id = m.medicine_id
@@ -991,14 +1112,16 @@ func generateBillForAppointment(appointmentID int) error {
 	if err == nil {
 		defer medicineRows.Close()
 		if medicineRows.Next() {
-			medicineRows.Scan(&medicineTotal)
+			medicineRows.Scan(&medicineTotal, &medicineCount)
 		}
 	}
 
 	// Calculate lab test charges
 	var labTestTotal int = 0
-	labRows, err := config.DB.Query(context.Background(),
-		`SELECT COALESCE(SUM(CAST(ltc.price AS INTEGER)), 0)
+	var labTestCount int = 0
+	labRows, err := tx.Query(context.Background(),
+		`SELECT COALESCE(SUM(CAST(ltc.price AS INTEGER)), 0),
+		        COUNT(DISTINCT lr.lab_report_id)
 		 FROM lab_reports lr
 		 JOIN lab_tests_catalog ltc ON lr.test_name = ltc.name
 		 WHERE lr.appointment_id=$1`,
@@ -1007,7 +1130,7 @@ func generateBillForAppointment(appointmentID int) error {
 	if err == nil {
 		defer labRows.Close()
 		if labRows.Next() {
-			labRows.Scan(&labTestTotal)
+			labRows.Scan(&labTestTotal, &labTestCount)
 		}
 	}
 
@@ -1015,17 +1138,61 @@ func generateBillForAppointment(appointmentID int) error {
 	totalAmount := consultationFee + medicineTotal + labTestTotal
 
 	// Create description with breakdown
-	description := fmt.Sprintf("Consultation: ₹%d | Medicines: ₹%d | Lab Tests: ₹%d", consultationFee, medicineTotal, labTestTotal)
+	description := fmt.Sprintf("Consultation: ₹%d | Medicines: ₹%d | Lab Tests: ₹%d", 
+		consultationFee/100, medicineTotal/100, labTestTotal/100)
 
-	// Insert bill with total amount
-	_, err = config.DB.Exec(context.Background(),
+	// Insert bill record
+	var billID int
+	err = tx.QueryRow(context.Background(),
 		`INSERT INTO billing (patient_id, appointment_id, amount, status, description, created_at)
-		 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)`,
+		 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+		 RETURNING bill_id`,
 		patientID, appointmentID, totalAmount, "pending", description,
-	)
+	).Scan(&billID)
 
 	if err != nil {
 		return fmt.Errorf("failed to create bill: %v", err)
+	}
+
+	// Insert itemized line items
+	// 1. Consultation charge
+	_, err = tx.Exec(context.Background(),
+		`INSERT INTO billing_items (bill_id, item_type, description, quantity, unit_price, total_amount, reference_id)
+		 VALUES ($1, 'consultation', 'Doctor Consultation Fee', 1, $2, $3, $4)`,
+		billID, consultationFee, consultationFee, appointmentID,
+	)
+
+	// 2. Medicine charges (if any)
+	if medicineTotal > 0 {
+		medicineDesc := fmt.Sprintf("%d medicine(s)", medicineCount)
+		_, _ = tx.Exec(context.Background(),
+			`INSERT INTO billing_items (bill_id, item_type, description, quantity, unit_price, total_amount, reference_id)
+			 VALUES ($1, 'medicine', $2, 1, $3, $4, $5)`,
+			billID, medicineDesc, medicineTotal, medicineTotal, appointmentID,
+		)
+	}
+
+	// 3. Lab test charges (if any)
+	if labTestTotal > 0 {
+		labDesc := fmt.Sprintf("%d lab test(s)", labTestCount)
+		_, _ = tx.Exec(context.Background(),
+			`INSERT INTO billing_items (bill_id, item_type, description, quantity, unit_price, total_amount, reference_id)
+			 VALUES ($1, 'lab_test', $2, 1, $3, $4, $5)`,
+			billID, labDesc, labTestTotal, labTestTotal, appointmentID,
+		)
+	}
+
+	// Create audit log
+	_, _ = tx.Exec(context.Background(),
+		`INSERT INTO billing_audit_log (bill_id, action, old_status, new_status, change_reason)
+		 VALUES ($1, 'created', NULL, 'pending', 'Auto-generated from appointment completion')`,
+		billID,
+	)
+
+	// Commit transaction
+	err = tx.Commit(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to commit bill creation: %v", err)
 	}
 
 	return nil

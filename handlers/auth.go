@@ -69,6 +69,13 @@ type RegisterInput struct {
 	Role      string `json:"role"`
 }
 
+// Simple input for staff creation (receptionist, pharmacist, billing)
+type SimpleStaffInput struct {
+	Name     string `json:"name" binding:"required"`
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
 func splitRegisterName(fullName string) (string, string) {
 	parts := strings.Fields(strings.TrimSpace(fullName))
 	if len(parts) == 0 {
@@ -98,6 +105,7 @@ func isAllowedRegisterRole(role string) bool {
 		"patient":      true,
 		"receptionist": true,
 		"pharmacy":     true,
+		"billing":      true,
 	}
 	return allowed[role]
 }
@@ -246,7 +254,7 @@ func Register(c *gin.Context) {
 }
 
 func CreateReceptionistByAdmin(c *gin.Context) {
-	var input RegisterInput
+	var input SimpleStaffInput
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -280,7 +288,7 @@ func CreateReceptionistByAdmin(c *gin.Context) {
 }
 
 func CreatePharmacistByAdmin(c *gin.Context) {
-	var input RegisterInput
+	var input SimpleStaffInput
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -420,6 +428,52 @@ func DoctorDashboard(c *gin.Context) {
 func PatientDashboard(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Welcome to Patient Dashboard",
+	})
+}
+
+func CreateBillingStaffByAdmin(c *gin.Context) {
+	var input SimpleStaffInput
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		fmt.Println("DEBUG: ShouldBindJSON error:", err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	fmt.Printf("DEBUG: Received input - Name: %s, Email: %s, Password: %s\n", input.Name, input.Email, input.Password)
+
+	input.Name = strings.TrimSpace(input.Name)
+	input.Email = strings.TrimSpace(strings.ToLower(input.Email))
+	input.Password = strings.TrimSpace(input.Password)
+
+	if input.Name == "" || input.Email == "" || input.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name, email and password are required"})
+		return
+	}
+
+	err := createUserWithRole(input.Name, input.Email, input.Password, "billing")
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23505" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Email already exists"})
+				return
+			}
+			if pgErr.Code == "23514" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role value"})
+				return
+			}
+		}
+		fmt.Println("DB ERROR:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Billing staff creation failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Billing staff created successfully"})
+}
+
+func BillingDashboard(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Welcome to Billing Dashboard",
 	})
 }
 
@@ -595,4 +649,88 @@ func UpdatePharmacist(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Pharmacist updated successfully"})
+}
+
+func GetBillingStaff(c *gin.Context) {
+	rows, err := config.DB.Query(context.Background(),
+		"SELECT user_id, name, email FROM users WHERE role = 'billing' ORDER BY name")
+	if err != nil {
+		fmt.Println("DB ERROR:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch billing staff"})
+		return
+	}
+	defer rows.Close()
+
+	var billingStaff []gin.H
+	for rows.Next() {
+		var id int
+		var name, email string
+		if err := rows.Scan(&id, &name, &email); err != nil {
+			fmt.Println("SCAN ERROR:", err)
+			continue
+		}
+		billingStaff = append(billingStaff, gin.H{
+			"id":    id,
+			"name":  name,
+			"email": email,
+		})
+	}
+
+	c.JSON(http.StatusOK, billingStaff)
+}
+
+func DeleteBillingStaff(c *gin.Context) {
+	id := c.Param("id")
+
+	// Delete the user
+	result, err := config.DB.Exec(context.Background(),
+		"DELETE FROM users WHERE user_id = $1 AND role = 'billing'",
+		id)
+	if err != nil {
+		fmt.Println("DB ERROR:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete billing staff"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Billing staff not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Billing staff deleted successfully"})
+}
+
+func UpdateBillingStaff(c *gin.Context) {
+	id := c.Param("id")
+
+	var input struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if input.Name == "" || input.Email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Name and email are required"})
+		return
+	}
+
+	result, err := config.DB.Exec(context.Background(),
+		"UPDATE users SET name = $1, email = $2 WHERE user_id = $3 AND role = 'billing'",
+		input.Name, input.Email, id)
+	if err != nil {
+		fmt.Println("DB ERROR:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update billing staff"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Billing staff not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Billing staff updated successfully"})
 }

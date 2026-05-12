@@ -51,7 +51,7 @@ func ensureFeatureTables() error {
 			IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users') THEN
 				ALTER TABLE users
 				ADD CONSTRAINT users_role_check
-				CHECK (lower(role) IN ('admin', 'doctor', 'patient', 'receptionist', 'pharmacy'))
+				CHECK (lower(role) IN ('admin', 'doctor', 'patient', 'receptionist', 'pharmacy', 'billing'))
 				NOT VALID;
 			END IF;
 		END $$`,
@@ -177,6 +177,18 @@ func ensureFeatureTables() error {
 		`ALTER TABLE billing ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'pending'`,
 		`ALTER TABLE billing ADD COLUMN IF NOT EXISTS description TEXT`,
 		`ALTER TABLE billing ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+		`CREATE TABLE IF NOT EXISTS billing_items (
+			item_id SERIAL PRIMARY KEY,
+			bill_id INT NOT NULL,
+			item_type VARCHAR(50) NOT NULL,
+			description TEXT,
+			quantity INT DEFAULT 1,
+			unit_price INT DEFAULT 0,
+			total_amount INT DEFAULT 0,
+			reference_id INT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (bill_id) REFERENCES billing(bill_id) ON DELETE CASCADE
+		)`,
 		`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS appointment_time TIME`,
 		`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reason TEXT`,
 		`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'scheduled'`,
@@ -228,6 +240,7 @@ func ensureFeatureTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_lab_reports_status ON lab_reports(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_patient_id ON billing(patient_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_billing_status ON billing(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_billing_items_bill_id ON billing_items(bill_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_receptionists_user_id ON receptionists(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_receptionists_department_id ON receptionists(department_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pharmacists_user_id ON pharmacists(user_id)`,

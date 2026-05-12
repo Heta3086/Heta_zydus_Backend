@@ -28,6 +28,7 @@ func SetupRoutes(r *gin.Engine) {
 		auth.GET("/admin", middleware.RoleMiddleware("admin"), handlers.AdminDashboard)
 		auth.GET("/doctor", middleware.RoleMiddleware("doctor"), handlers.DoctorDashboard)
 		auth.GET("/patient", middleware.RoleMiddleware("patient"), handlers.PatientDashboard)
+		auth.GET("/billing", middleware.RoleMiddleware("billing"), handlers.BillingDashboard)
 		auth.POST("/departments", middleware.RoleMiddleware("admin"), handlers.CreateDepartment)
 		auth.GET("/departments", handlers.GetDepartments)
 		auth.GET("/departments/overview", handlers.GetDepartmentOverview)
@@ -45,6 +46,10 @@ func SetupRoutes(r *gin.Engine) {
 		auth.GET("/admin/pharmacists", handlers.GetPharmacists)
 		auth.PUT("/admin/pharmacists/:id", middleware.RoleMiddleware("admin"), handlers.UpdatePharmacist)
 		auth.DELETE("/admin/pharmacists/:id", middleware.RoleMiddleware("admin"), handlers.DeletePharmacist)
+		auth.POST("/admin/billing", middleware.RoleMiddleware("admin"), handlers.CreateBillingStaffByAdmin)
+		auth.GET("/admin/billing", handlers.GetBillingStaff)
+		auth.PUT("/admin/billing/:id", middleware.RoleMiddleware("admin"), handlers.UpdateBillingStaff)
+		auth.DELETE("/admin/billing/:id", middleware.RoleMiddleware("admin"), handlers.DeleteBillingStaff)
 		auth.POST("/patients", middleware.RoleMiddleware("receptionist"), handlers.CreatePatient)
 		auth.GET("/patients", handlers.GetPatients)
 		auth.GET("/patients/:id", handlers.GetPatientByID)
@@ -53,6 +58,7 @@ func SetupRoutes(r *gin.Engine) {
 		auth.DELETE("/departments/:id", middleware.RoleMiddleware("admin"), handlers.DeleteDepartment)
 		auth.POST("/logout", handlers.Logout)
 		auth.POST("/appointments", middleware.RoleMiddleware("patient"), handlers.CreateAppointment)
+		auth.POST("/receptionist/book-appointment", middleware.RoleMiddleware("receptionist"), handlers.BookPatientAppointment)
 
 		auth.GET("/appointments", handlers.GetAppointments)
 		auth.GET("/receptionist/rejected-appointments", middleware.RoleMiddleware("receptionist"), handlers.GetReceptionistRejectedAppointments)
@@ -71,6 +77,7 @@ func SetupRoutes(r *gin.Engine) {
 		auth.PUT("/appointments/:id/complete", middleware.RoleMiddleware("doctor"), handlers.CompleteAppointment)
 
 		auth.GET("/my-appointments", middleware.RoleMiddleware("patient"), handlers.GetMyAppointments)
+		auth.PUT("/my-appointments/:id/cancel", middleware.RoleMiddleware("patient"), handlers.CancelPatientAppointment)
 		auth.GET("/my-prescriptions", middleware.RoleMiddleware("patient"), handlers.GetMyPrescriptions)
 
 		auth.POST("/pharmacy/items", middleware.RoleMiddleware("admin", "pharmacy"), handlers.CreatePharmacyItem)
@@ -86,6 +93,11 @@ func SetupRoutes(r *gin.Engine) {
 		auth.GET("/my-lab-reports", middleware.RoleMiddleware("patient"), handlers.GetMyLabReports)
 		auth.GET("/my-bills", middleware.RoleMiddleware("patient"), handlers.GetMyBills)
 
+		// NEW: Enhanced Billing APIs
+		auth.GET("/bills/:id/details", handlers.GetBillWithItems)
+		auth.PUT("/bills/:id/mark-paid", middleware.RoleMiddleware("receptionist"), handlers.MarkBillAsPaid)
+		auth.GET("/admin/bills", middleware.RoleMiddleware("admin"), handlers.GetAllBills)
+
 		// Lab Tests Catalog (master data with pricing)
 		auth.GET("/lab-tests-catalog", handlers.GetLabTestsCatalog)
 		auth.GET("/lab-tests-catalog/:id", handlers.GetLabTestCatalogByID)
@@ -93,5 +105,10 @@ func SetupRoutes(r *gin.Engine) {
 		auth.POST("/lab-tests-catalog", middleware.RoleMiddleware("admin"), handlers.CreateLabTestCatalog)
 		auth.PUT("/lab-tests-catalog/:id", middleware.RoleMiddleware("admin"), handlers.UpdateLabTestCatalog)
 		auth.DELETE("/lab-tests-catalog/:id", middleware.RoleMiddleware("admin"), handlers.DeleteLabTestCatalog)
+
+		// NEW: Simplified Billing Workflow
+		auth.POST("/doctor/bills", middleware.RoleMiddleware("doctor"), handlers.CreateBillByDoctor)
+		auth.GET("/billing/all", middleware.RoleMiddleware("billing"), handlers.GetAllBillsSimplified)
+		auth.PUT("/bills/:id/paid", middleware.RoleMiddleware("billing"), handlers.UpdateBillStatusToPaid)
 	}
 }
